@@ -111,19 +111,29 @@ class EntityDbMeta {
         Set<String> existingTableNames = new HashSet<>()
 
         boolean beganTx = useTxForMetaData ? efi.ecfi.transactionFacade.begin(300) : false
-        try (Connection con = efi.getConnection(groupName)) {
+        try {
+            Connection con = efi.getConnection(groupName)
+
+            try {
                 DatabaseMetaData dbData = con.getMetaData()
-                try (ResultSet tableSet = dbData.getTables(con.getCatalog(), schemaName, "%", types)) {
+
+                ResultSet tableSet = null
+                try {
+                    tableSet = dbData.getTables(con.getCatalog(), schemaName, "%", types)
                     while (tableSet.next()) {
                         String tableName = tableSet.getString('TABLE_NAME')
                         existingTableNames.add(tableName)
                     }
                 } catch (Exception e) {
                     throw new EntityException("Exception getting tables in group ${groupName}", e)
+                } finally {
+                    if (tableSet != null && !tableSet.isClosed()) tableSet.close()
                 }
 
                 Map<String, Set<String>> existingColumnsByTable = new HashMap<>()
-                try (ResultSet colSet = dbData.getColumns(con.getCatalog(), schemaName, "%", "%")) {
+                ResultSet colSet = null
+                try {
+                    colSet = dbData.getColumns(con.getCatalog(), schemaName, "%", "%")
                     while (colSet.next()) {
                         String tableName = colSet.getString("TABLE_NAME")
                         String colName = colSet.getString("COLUMN_NAME")
@@ -139,6 +149,8 @@ class EntityDbMeta {
                     }
                 } catch (Exception e) {
                     throw new EntityException("Exception getting columns in group ${groupName}", e)
+                } finally {
+                    if (colSet != null && !colSet.isClosed()) colSet.close()
                 }
 
                 Set<String> remainingTableNames = new HashSet<>(existingTableNames)
@@ -198,6 +210,9 @@ class EntityDbMeta {
 
                 if (remainingTableNames.size() > 0)
                     logger.warn("Found unknown tables in database for group ${groupName}: ${remainingTableNames}")
+            } finally {
+                if (con != null) con.close()
+            }
         } finally {
             if (beganTx) efi.ecfi.transactionFacade.commit()
         }
@@ -207,15 +222,20 @@ class EntityDbMeta {
             logger.info("Tables were created, checking FKs for all entities in group ${groupName}")
 
             beganTx = useTxForMetaData ? efi.ecfi.transactionFacade.begin(300) : false
-            try (Connection con = efi.getConnection(groupName)) {
+            try {
+                Connection con = efi.getConnection(groupName)
+
+                try {
                     DatabaseMetaData dbData = con.getMetaData()
 
                     // NOTE: don't need to get fresh results for existing table names as created tables are added to the Set above
 
                     Map<String, Map<String, Set<String>>> fkInfoByFkTable = new HashMap<>()
-                    try (ResultSet ikSet = dbData.getImportedKeys(null, schemaName, "%")) {
+                    ResultSet ikSet = null
+                    try {
                         // don't rely on constraint name, look at related table name, keys
                         // get set of fields on main entity to match against (more unique than fields on related entity)
+                        ikSet = dbData.getImportedKeys(null, schemaName, "%")
                         while (ikSet.next()) {
                             // logger.info("Existing FK col: PKTABLE_NAME [${ikSet.getString("PKTABLE_NAME")}] PKCOLUMN_NAME [${ikSet.getString("PKCOLUMN_NAME")}] FKTABLE_NAME [${ikSet.getString("FKTABLE_NAME")}] FKCOLUMN_NAME [${ikSet.getString("FKCOLUMN_NAME")}]")
                             String pkTable = ikSet.getString("PKTABLE_NAME")
@@ -230,6 +250,8 @@ class EntityDbMeta {
                         }
                     } catch (Exception e) {
                         logger.error("Error getting all foreign keys for group ${groupName}", e)
+                    } finally {
+                        if (ikSet != null && !ikSet.isClosed()) ikSet.close()
                     }
 
                     if (fkInfoByFkTable.size() == 0) {
@@ -239,7 +261,8 @@ class EntityDbMeta {
                             if (ed.isViewEntity) continue
                             String fkTable = ed.getTableName()
                             boolean gotIkResults = false
-                            try (ResultSet ikSet = dbData.getImportedKeys(null, schemaName, fkTable)) {
+                            try {
+                                ikSet = dbData.getImportedKeys(null, schemaName, fkTable)
                                 while (ikSet.next()) {
                                     gotIkResults = true
                                     String pkTable = ikSet.getString("PKTABLE_NAME")
@@ -252,10 +275,13 @@ class EntityDbMeta {
                                 }
                             } catch (Exception e) {
                                 logger.error("Error getting foreign keys for entity ${entityName} group ${groupName}", e)
+                            } finally {
+                                if (ikSet != null && !ikSet.isClosed()) ikSet.close()
                             }
                             if (!gotIkResults) {
                                 // no results found, try lower case table name
-                                try (ResultSet ikSet = dbData.getImportedKeys(null, schemaName, fkTable.toLowerCase())) {
+                                try {
+                                    ikSet = dbData.getImportedKeys(null, schemaName, fkTable.toLowerCase())
                                     while (ikSet.next()) {
                                         String pkTable = ikSet.getString("PKTABLE_NAME")
                                         String fkCol = ikSet.getString("FKCOLUMN_NAME")
@@ -267,6 +293,8 @@ class EntityDbMeta {
                                     }
                                 } catch (Exception e) {
                                     logger.error("Error getting foreign keys for entity ${entityName} group ${groupName}", e)
+                                } finally {
+                                    if (ikSet != null && !ikSet.isClosed()) ikSet.close()
                                 }
                             }
                         }
@@ -338,6 +366,9 @@ class EntityDbMeta {
                         if (noRelTableCount > 0) logger.warn("In full FK check found ${noRelTableCount} type one relationships where no table exists for related entity")
                         if (fksCreated > 0) logger.info("Created ${fksCreated} FKs out of ${relOneCount} type one relationships for entity ${entityName}")
                     }
+                } finally {
+                    if (con != null) con.close()
+                }
             } finally {
                 if (beganTx) efi.ecfi.transactionFacade.commit()
             }
@@ -419,32 +450,39 @@ class EntityDbMeta {
             dbResult = anyExist
         } else {
             String groupName = ed.getEntityGroupName()
+            Connection con = null
+            ResultSet tableSet1 = null
+            ResultSet tableSet2 = null
             boolean beganTx = useTxForMetaData ? efi.ecfi.transactionFacade.begin(5) : false
-            try (Connection con = efi.getConnection(groupName)) {
+            try {
+                try {
+                    con = efi.getConnection(groupName)
+                } catch (EntityException ee) {
+                    logger.warn("Could not get connection so treating entity ${ed.fullEntityName} in group ${groupName} as table does not exist: ${ee.toString()}")
+                    return false
+                }
                 DatabaseMetaData dbData = con.getMetaData()
 
                 String[] types = ["TABLE", "VIEW", "ALIAS", "SYNONYM", "PARTITIONED TABLE"]
-                try (ResultSet tableSet1 = dbData.getTables(con.getCatalog(), ed.getSchemaName(), ed.getTableName(), types)) {
+                tableSet1 = dbData.getTables(con.getCatalog(), ed.getSchemaName(), ed.getTableName(), types)
                 if (tableSet1.next()) {
                     dbResult = true
                 } else {
                     // try lower case, just in case DB is case sensitive
-                    try (ResultSet tableSet2 = dbData.getTables(con.getCatalog(), ed.getSchemaName(), ed.getTableName().toLowerCase(), types)) {
+                    tableSet2 = dbData.getTables(con.getCatalog(), ed.getSchemaName(), ed.getTableName().toLowerCase(), types)
                     if (tableSet2.next()) {
                         dbResult = true
                     } else {
                         if (logger.isTraceEnabled()) logger.trace("Table for entity ${ed.getFullEntityName()} does NOT exist")
                         dbResult = false
                     }
-                    }
                 }
-                }
-            }  catch (EntityException ee) {
-                logger.warn("Could not get connection so treating entity ${ed.fullEntityName} in group ${groupName} as table does not exist: ${ee.toString()}")
-                return false
             } catch (Exception e) {
                 throw new EntityException("Exception checking to see if table ${ed.getTableName()} exists", e)
             } finally {
+                if (tableSet1 != null && !tableSet1.isClosed()) tableSet1.close()
+                if (tableSet2 != null && !tableSet2.isClosed()) tableSet2.close()
+                if (con != null) con.close()
                 if (beganTx) efi.ecfi.transactionFacade.commit()
             }
         }
@@ -527,15 +565,18 @@ class EntityDbMeta {
         if (ed.isViewEntity) return new ArrayList<FieldInfo>()
 
         String groupName = ed.getEntityGroupName()
-
+        Connection con = null
+        ResultSet colSet1 = null
+        ResultSet colSet2 = null
         boolean beganTx = useTxForMetaData ? efi.ecfi.transactionFacade.begin(5) : false
-        try (Connection con = efi.getConnection(groupName)) {
+        try {
+            con = efi.getConnection(groupName)
             DatabaseMetaData dbData = con.getMetaData()
             // con.setAutoCommit(false)
 
             ArrayList<FieldInfo> fieldInfos = new ArrayList<>(ed.allFieldInfoList)
             int fieldCount = fieldInfos.size()
-            try (ResultSet colSet1 = dbData.getColumns(con.getCatalog(), ed.getSchemaName(), ed.getTableName(), "%")) {
+            colSet1 = dbData.getColumns(con.getCatalog(), ed.getSchemaName(), ed.getTableName(), "%")
             if (colSet1.isClosed()) {
                 logger.error("Tried to get columns for entity ${ed.getFullEntityName()} but ResultSet was closed!")
                 return new ArrayList<FieldInfo>()
@@ -551,11 +592,10 @@ class EntityDbMeta {
                     }
                 }
             }
-            }
 
             if (fieldInfos.size() == fieldCount) {
                 // try lower case table name
-                try (ResultSet colSet2 = dbData.getColumns(con.getCatalog(), ed.getSchemaName(), ed.getTableName().toLowerCase(), "%")) {
+                colSet2 = dbData.getColumns(con.getCatalog(), ed.getSchemaName(), ed.getTableName().toLowerCase(), "%")
                 if (colSet2.isClosed()) {
                     logger.error("Tried to get columns for entity ${ed.getFullEntityName()} but ResultSet was closed!")
                     return new ArrayList<FieldInfo>()
@@ -571,7 +611,6 @@ class EntityDbMeta {
                         }
                     }
                 }
-                }
 
                 if (fieldInfos.size() == fieldCount) {
                     logger.warn("Could not find any columns to match fields for entity ${ed.getFullEntityName()}")
@@ -583,6 +622,9 @@ class EntityDbMeta {
             logger.error("Exception checking for missing columns in table ${ed.getTableName()}", e)
             return new ArrayList<FieldInfo>()
         } finally {
+            if (colSet1 != null && !colSet1.isClosed()) colSet1.close()
+            if (colSet2 != null && !colSet2.isClosed()) colSet2.close()
+            if (con != null && !con.isClosed()) con.close()
             if (beganTx) efi.ecfi.transactionFacade.commit()
         }
     }
@@ -779,11 +821,15 @@ class EntityDbMeta {
     }
     Boolean indexExists(EntityDefinition ed, String indexName, Collection<String> indexFields) {
         String groupName = ed.getEntityGroupName()
-        try (Connection con = efi.getConnection(groupName)) {
+        Connection con = null
+        ResultSet ikSet1 = null
+        ResultSet ikSet2 = null
+        try {
+            con = efi.getConnection(groupName)
             DatabaseMetaData dbData = con.getMetaData()
             Set<String> fieldNames = new HashSet(indexFields)
 
-            try (ResultSet ikSet1 = dbData.getIndexInfo(null, ed.getSchemaName(), ed.getTableName(), false, true)) {
+            ikSet1 = dbData.getIndexInfo(null, ed.getSchemaName(), ed.getTableName(), false, true)
             while (ikSet1.next()) {
                 String idxName = ikSet1.getString("INDEX_NAME")
                 if (idxName.toLowerCase() != indexName.toLowerCase()) continue
@@ -796,10 +842,9 @@ class EntityDbMeta {
                     }
                 }
             }
-            }
             if (fieldNames.size() > 0) {
                 // try with lower case table name
-                try (ResultSet ikSet2 = dbData.getIndexInfo(null, ed.getSchemaName(), ed.getTableName().toLowerCase(), false, true)) {
+                ikSet2 = dbData.getIndexInfo(null, ed.getSchemaName(), ed.getTableName().toLowerCase(), false, true)
                 while (ikSet2.next()) {
                     String idxName = ikSet2.getString("INDEX_NAME")
                     if (idxName.toLowerCase() != indexName.toLowerCase()) continue
@@ -812,7 +857,6 @@ class EntityDbMeta {
                         }
                     }
                 }
-                }
             }
 
             // if we found all of the index-field field-names then fieldNames will be empty, and we have a full index
@@ -820,14 +864,21 @@ class EntityDbMeta {
         } catch (Exception e) {
             logger.error("Exception checking to see if index exists for table ${ed.getTableName()}", e)
             return null
+        } finally {
+            if (ikSet1 != null && !ikSet1.isClosed()) ikSet1.close()
+            if (ikSet2 != null && !ikSet2.isClosed()) ikSet2.close()
+            if (con != null) con.close()
         }
     }
 
     Boolean foreignKeyExists(EntityDefinition ed, RelationshipInfo relInfo) {
         String groupName = ed.getEntityGroupName()
         EntityDefinition relEd = relInfo.relatedEd
-        try (Connection con = efi.getConnection(groupName)) {
-
+        Connection con = null
+        ResultSet ikSet1 = null
+        ResultSet ikSet2 = null
+        try {
+            con = efi.getConnection(groupName)
             DatabaseMetaData dbData = con.getMetaData()
 
             // don't rely on constraint name, look at related table name, keys
@@ -836,7 +887,7 @@ class EntityDbMeta {
             Set<String> fieldNames = new HashSet(keyMap.keySet())
             Set<String> fkColsFound = new HashSet()
 
-            try (ResultSet ikSet1 = dbData.getImportedKeys(null, ed.getSchemaName(), ed.getTableName())) {
+            ikSet1 = dbData.getImportedKeys(null, ed.getSchemaName(), ed.getTableName())
             while (ikSet1.next()) {
                 String pkTable = ikSet1.getString("PKTABLE_NAME")
                 // logger.info("FK exists [${ed.getFullEntityName()}] - [${relNode."@title"}${relEd.getFullEntityName()}] PKTABLE_NAME [${ikSet.getString("PKTABLE_NAME")}] PKCOLUMN_NAME [${ikSet.getString("PKCOLUMN_NAME")}] FKCOLUMN_NAME [${ikSet.getString("FKCOLUMN_NAME")}]")
@@ -851,10 +902,9 @@ class EntityDbMeta {
                     }
                 }
             }
-            }
             if (fieldNames.size() > 0) {
                 // try with lower case table name
-                try (ResultSet ikSet2 = dbData.getImportedKeys(null, ed.getSchemaName(), ed.getTableName().toLowerCase())) {
+                ikSet2 = dbData.getImportedKeys(null, ed.getSchemaName(), ed.getTableName().toLowerCase())
                 while (ikSet2.next()) {
                     String pkTable = ikSet2.getString("PKTABLE_NAME")
                     // logger.info("FK exists [${ed.getFullEntityName()}] - [${relNode."@title"}${relEd.getFullEntityName()}] PKTABLE_NAME [${ikSet.getString("PKTABLE_NAME")}] PKCOLUMN_NAME [${ikSet.getString("PKCOLUMN_NAME")}] FKCOLUMN_NAME [${ikSet.getString("FKCOLUMN_NAME")}]")
@@ -869,7 +919,6 @@ class EntityDbMeta {
                         }
                     }
                 }
-                }
             }
 
             // logger.info("Checking FK exists for entity [${ed.getFullEntityName()}] relationship [${relNode."@title"}${relEd.getFullEntityName()}] fields to match are [${keyMap.keySet()}] FK columns found [${fkColsFound}] final fieldNames (empty for match) [${fieldNames}]")
@@ -879,12 +928,20 @@ class EntityDbMeta {
         } catch (Exception e) {
             logger.error("Exception checking to see if foreign key exists for table ${ed.getTableName()}", e)
             return null
+        } finally {
+            if (ikSet1 != null && !ikSet1.isClosed()) ikSet1.close()
+            if (ikSet2 != null && !ikSet2.isClosed()) ikSet2.close()
+            if (con != null) con.close()
         }
     }
     String getForeignKeyName(EntityDefinition ed, RelationshipInfo relInfo) {
         String groupName = ed.getEntityGroupName()
         EntityDefinition relEd = relInfo.relatedEd
-        try (Connection con = efi.getConnection(groupName)) {
+        Connection con = null
+        ResultSet ikSet1 = null
+        ResultSet ikSet2 = null
+        try {
+            con = efi.getConnection(groupName)
             DatabaseMetaData dbData = con.getMetaData()
 
             // don't rely on constraint name, look at related table name, keys
@@ -894,7 +951,7 @@ class EntityDbMeta {
             List<String> fieldNames = new ArrayList(keyMap.keySet())
             Map<String, Set<String>> fieldsByFkName = new HashMap<>()
 
-            try (ResultSet ikSet1 = dbData.getImportedKeys(null, ed.getSchemaName(), ed.getTableName())) {
+            ikSet1 = dbData.getImportedKeys(null, ed.getSchemaName(), ed.getTableName())
             while (ikSet1.next()) {
                 String pkTable = ikSet1.getString("PKTABLE_NAME")
                 // logger.info("FK exists [${ed.getFullEntityName()}] - [${relNode."@title"}${relEd.getFullEntityName()}] PKTABLE_NAME [${ikSet.getString("PKTABLE_NAME")}] PKCOLUMN_NAME [${ikSet.getString("PKCOLUMN_NAME")}] FKCOLUMN_NAME [${ikSet.getString("FKCOLUMN_NAME")}]")
@@ -911,10 +968,9 @@ class EntityDbMeta {
                     }
                 }
             }
-            }
             if (fieldNames.size() > 0) {
                 // try with lower case table name
-                try (ResultSet ikSet2 = dbData.getImportedKeys(null, ed.getSchemaName(), ed.getTableName().toLowerCase())) {
+                ikSet2 = dbData.getImportedKeys(null, ed.getSchemaName(), ed.getTableName().toLowerCase())
                 while (ikSet2.next()) {
                     String pkTable = ikSet2.getString("PKTABLE_NAME")
                     // logger.info("FK exists [${ed.getFullEntityName()}] - [${relNode."@title"}${relEd.getFullEntityName()}] PKTABLE_NAME [${ikSet.getString("PKTABLE_NAME")}] PKCOLUMN_NAME [${ikSet.getString("PKCOLUMN_NAME")}] FKCOLUMN_NAME [${ikSet.getString("FKCOLUMN_NAME")}]")
@@ -931,7 +987,6 @@ class EntityDbMeta {
                         }
                     }
                 }
-                }
             }
 
             // logger.warn("fieldNames: ${fieldNames}"); logger.warn("fieldsByFkName: ${fieldsByFkName}")
@@ -942,6 +997,10 @@ class EntityDbMeta {
         } catch (Exception e) {
             logger.error("Exception getting foreign key name for table ${ed.getTableName()}", e)
             return null
+        } finally {
+            if (ikSet1 != null && !ikSet1.isClosed()) ikSet1.close()
+            if (ikSet2 != null && !ikSet2.isClosed()) ikSet2.close()
+            if (con != null) con.close()
         }
     }
 
@@ -1132,15 +1191,16 @@ class EntityDbMeta {
         try {
             // use a short timeout here just in case this is in the middle of stuff going on with tables locked, may happen a lot for FK ops
             efi.ecfi.transactionFacade.runRequireNew(10, "Error in DB meta data change", useTxForMetaData, true, {
-                if (sharedCon != null) {
-                    try (Statement stmt = sharedCon.createStatement()) {
-                        records = stmt.executeUpdate(sql.toString())
-                    }
-                } else {
-                    try (Connection con = efi.getConnection(groupName)
-                        Statement stmt = con.createStatement()) {
-                        records = stmt.executeUpdate(sql.toString())
-                    }
+                Connection con = null
+                Statement stmt = null
+
+                try {
+                    con = sharedCon != null ? sharedCon : efi.getConnection(groupName)
+                    stmt = con.createStatement()
+                    records = stmt.executeUpdate(sql.toString())
+                } finally {
+                    if (stmt != null) stmt.close()
+                    if (con != null && sharedCon == null) con.close()
                 }
             })
         } catch (Throwable t) {
